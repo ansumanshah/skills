@@ -1,0 +1,1 @@
+{"ffi_format":1,"functions":[{"name":"flock","symbol":"flock","params":["i32","i32"],"returns":"i32"},{"name":"setCloexec","symbol":"set_cloexec","params":["i32"],"returns":"i32"}],"libraries":["./libnative.a"],"system_libraries":[]}

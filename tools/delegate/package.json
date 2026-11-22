@@ -1,0 +1,19 @@
+{
+  "name": "delegate",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "native": "clang -O2 -c native/native.c -o native/native.o && ar rcs native/libnative.a native/native.o",
+    "schemas": "bun scripts/gen-schemas.ts",
+    "build": "bun run native && bun run schemas && scriptc build src/delegate.ts --ffi native/ffi.json -o bin/delegate",
+    "coverage": "scriptc coverage src/delegate.ts --ffi native/ffi.json",
+    "package": "sh scripts/package.sh",
+    "notifiers": "sh scripts/install-notifiers.sh",
+    "test": "bun test tests"
+  },
+  "devDependencies": {
+    "scriptc": "0.4.8"
+  },
+  "trustedDependencies": ["scriptc"]
+}

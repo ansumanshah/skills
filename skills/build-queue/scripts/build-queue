@@ -1,0 +1,463 @@
+#!/bin/sh
+# build-queue: share this machine between agents: two heavy jobs at once, a third
+# when memory is free, and whole-machine jobs alone (builds, test suites, VM, simulator and device runs).
+#
+#   build-queue [options] <command> [args...]   run it in a free slot
+#   build-queue --solo <command> [args...]      run it alone (Xcode, Gradle, VM, E2E)
+#   build-queue --status                        free (exit 0) or who holds what (exit 1)
+#   build-queue --log [n]                       last n runs and skips, with peak memory (default 20)
+#
+# Options (before the command):
+#   --solo             wait for every slot and run alone
+#   --wait             queue up to 1800s (shorthand for --timeout 1800)
+#   --timeout <sec>    seconds to wait for a slot (overrides BUILD_QUEUE_TIMEOUT)
+#
+# BUILD_QUEUE_TIMEOUT    seconds to wait (default 10, 0 = try once). A timeout skips
+#                  the command with exit 75 and a "build-queue: skipped" line; agents
+#                  that must queue pass --wait (or set 1800) and run in the background.
+# BUILD_QUEUE_SLOTS      jobs that may run at once (default 3; the third needs twice BUILD_QUEUE_MIN_FREE).
+# BUILD_QUEUE_JOBS       parallelism cap for slot jobs (default half the cores, min 1), added
+#                  to xcodebuild, gradlew, swift build/test and cargo unless set.
+# BUILD_QUEUE_MIN_FREE   free memory % needed to start beside a running job (default 20).
+# BUILD_QUEUE_STATE_DIR  where locks, holders and log live (tests only).
+# Also turns on shared build caches: Xcode compilation caching and Gradle --build-cache.
+#
+# Uses /usr/bin/lockf -k on macOS or flock(1) on Linux. The kernel drops a lock when its job
+# exits, so a crash never leaves a slot stuck. A solo job first takes a gate,
+# so new jobs stop starting, then waits for every slot to drain.
+set -eu
+
+PATH="${PATH:-/usr/bin:/bin}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
+usage() { sed -n '2,/^# Uses /{ /^# Uses /d; s/^# \{0,1\}//p; }' "$0"; }
+case ${1:-} in
+-h | --help) usage; exit 0 ;;
+'') usage >&2; exit 64 ;;
+esac
+
+if [ -x /usr/bin/lockf ]; then
+    BUILD_QUEUE_LOCKER=lockf
+elif command -v flock >/dev/null 2>&1; then
+    BUILD_QUEUE_LOCKER=flock
+else
+    echo 'build-queue: needs /usr/bin/lockf (macOS) or flock (Linux)' >&2
+    exit 69
+fi
+export BUILD_QUEUE_LOCKER
+
+dir=${BUILD_QUEUE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/build-queue}
+log=$dir/log.tsv gate=$dir/gate
+slots=${BUILD_QUEUE_SLOTS:-3}
+case $slots in '' | 0 | *[!0-9]*) echo 'build-queue: BUILD_QUEUE_SLOTS must be a whole number above 0' >&2; exit 64 ;; esac
+mkdir -p "$dir"
+header='started\twaited_s\tran_s\texit\tpeak_mb\tfree_pct\tmode\tcold\tcheckout\tcommand'
+# A log from an older build-queue has fewer columns: keep it aside and start a new one.
+if [ -s "$log" ] && [ "$(head -1 "$log")" != "$(printf '%b' "$header")" ]; then mv -f "$log" "$log.old"; fi
+[ -s "$log" ] || printf '%b\n' "$header" >"$log"
+
+sanitize() { printf '%s' "$1" | tr '\t\r\n' '   '; }
+
+lock_exec() {
+    t=$1 file=$2; shift 2
+    if [ "$BUILD_QUEUE_LOCKER" = lockf ]; then
+        /usr/bin/lockf -s -t "$t" -k "$file" "$@"
+    elif [ "$t" -eq 0 ]; then
+        flock -n -E 75 "$file" "$@"
+    else
+        flock -w "$t" -E 75 "$file" "$@"
+    fi
+}
+
+free() { lock_exec 0 "$1" true 2>/dev/null; }
+
+# Prints "slot 1: held 2m10s by pid 123 in ~/code/app: just e2e" for one busy slot.
+describe_slot() {
+    holder=$dir/holder.$1
+    pid=$(sed -n 's/^pid=//p' "$holder" 2>/dev/null || true)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        started=$(sed -n 's/^started=//p' "$holder" 2>/dev/null || true)
+        # The job can end between reads; an empty start time must not break the arithmetic under set -e.
+        case $started in '' | *[!0-9]*) printf 'slot %s: held by pid %s (just finishing)\n' "$1" "$pid"; return ;; esac
+        s=$(( $(date +%s) - started ))
+        long=''; [ "$s" -lt 1800 ] || long=' [over 30 min: wrap only the heavy step?]'
+        printf 'slot %s: held %dm%02ds by pid %s in %s: %s%s\n' "$1" $((s / 60)) $((s % 60)) "$pid" \
+            "$(sed -n 's/^checkout=//p' "$holder" | sed "s|^$HOME|~|")" \
+            "$(sed -n 's/^command=//p' "$holder")" "$long"
+    else
+        printf 'slot %s: held by a job that is starting or ran without build-queue\n' "$1"
+    fi
+}
+
+# Every busy slot on one line each, plus a waiting solo job. Empty when all is free.
+describe() {
+    i=0
+    while [ "$i" -lt "$slots" ]; do
+        free "$dir/slot.$i" || describe_slot "$i"
+        i=$((i + 1))
+    done
+    free "$gate" || echo 'a solo job is waiting for the slots or running'
+}
+
+case ${1:-} in
+--sample)
+    # Internal: record the peak resident memory (KB) of process $2 and all its descendants into $3.
+    peak=0
+    while kill -0 "$2" 2>/dev/null; do
+        kb=$(ps -A -o pid= -o ppid= -o rss= | awk -v root="$2" '
+            { parent[$1] = $2; rss[$1] = $3 }
+            END {
+                for (p in rss) { q = p; for (d = 0; d < 64 && q != "" && q != 0; d++) { if (q == root) { sum += rss[p]; break } q = parent[q] } }
+                print sum + 0
+            }')
+        [ "$kb" -le "$peak" ] || { peak=$kb; echo "$peak" >"$3"; }
+        sleep 2
+    done
+    exit 0 ;;
+--status) busy=$(describe); if [ -z "$busy" ]; then echo free; exit 0; fi; echo "$busy"; exit 1 ;;
+--log) case ${2:-20} in '' | *[!0-9]*) echo 'build-queue: --log takes a whole number' >&2; exit 64 ;; esac
+    { head -1 "$log"; tail -n +2 "$log" | tail -n "${2:-20}"; } | column -t -s "$(printf '\t')"; exit 0 ;;
+esac
+
+solo=0
+timeout=${BUILD_QUEUE_TIMEOUT:-10}
+while [ $# -gt 0 ]; do
+    case $1 in
+    --solo) solo=1; shift ;;
+    --wait) timeout=1800; shift ;;
+    --timeout)
+        [ $# -ge 2 ] || { echo 'build-queue: --timeout needs seconds' >&2; exit 64; }
+        timeout=$2; shift 2 ;;
+    --timeout=*) timeout=${1#--timeout=}; shift ;;
+    --) shift; break ;;
+    *) break ;;
+    esac
+done
+[ $# -gt 0 ] || { echo 'build-queue: give a command to run' >&2; exit 64; }
+case $timeout in '' | *[!0-9]*) echo 'build-queue: BUILD_QUEUE_TIMEOUT must be whole seconds' >&2; exit 64 ;; esac
+
+# Re-entrancy: if already inside build-queue, pass through instead of taking another slot or deadlocking.
+case ${BUILD_QUEUE_HELD:-} in
+solo) exec "$@" ;;
+slot)
+    if [ "$solo" -eq 1 ]; then
+        echo 'build-queue: refusing nested --solo inside a slot job (would deadlock); wrap the outer command with --solo instead' >&2
+        exit 64
+    fi
+    exec "$@" ;;
+esac
+
+# Free memory as a whole percent: macOS memory_pressure, Linux /proc/meminfo, or 100 as fallback.
+free_pct() {
+    if [ -n "${BUILD_QUEUE_FAKE_FREE:-}" ]; then echo "$BUILD_QUEUE_FAKE_FREE"; return; fi  # tests
+    if command -v memory_pressure >/dev/null 2>&1; then
+        memory_pressure 2>/dev/null | sed -n 's/.*free percentage: \([0-9]*\)%.*/\1/p' | tail -1 | grep . && return
+    elif [ -r /proc/meminfo ]; then
+        awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{if (t>0 && a>=0) printf "%d\n", (a*100)/t}' /proc/meminfo | grep . && return
+    fi
+    echo 100
+}
+busy_count() {
+    i=0 n=0
+    while [ "$i" -lt "$slots" ]; do free "$dir/slot.$i" || n=$((n + 1)); i=$((i + 1)); done
+    echo "$n"
+}
+min_free=${BUILD_QUEUE_MIN_FREE:-20}
+case $min_free in '' | *[!0-9]*) echo 'build-queue: BUILD_QUEUE_MIN_FREE must be a whole percent' >&2; exit 64 ;; esac
+
+# Remember the original command (sanitized) before injecting cache/parallelism flags,
+# so --log is readable and --solo vs slot runs share cold-build history.
+orig_cmd=$(sanitize "$*")
+safe_pwd=$(sanitize "$PWD")
+
+# Check whether $1 appears in the remaining args before any `--` separator.
+has() {
+    flag=$1; shift
+    for a in "$@"; do
+        [ "$a" = -- ] && return 1
+        case $a in "$flag" | "$flag"=*) return 0 ;; esac
+    done
+    return 1
+}
+
+# SwiftPM locks its build folder, so two jobs on one package run one after the other anyway.
+# pkg_key names that folder; a job waits without a slot while another holds the same one.
+pkg_key=''
+if [ "${1##*/}" = swift ]; then
+    case ${2:-} in
+    build | test)
+        if [ "$solo" -eq 1 ]; then
+            echo 'build-queue: swift build/test runs as a slot job, not --solo (SwiftPM stays small; --solo stalls the machine)' >&2
+            solo=0
+        fi
+        p=. s='' prev=''
+        for a in "$@"; do
+            [ "$a" = -- ] && break
+            case $prev in --package-path) p=$a ;; --scratch-path) s=$a ;; esac
+            case $a in --package-path=*) p=${a#*=} ;; --scratch-path=*) s=${a#*=} ;; esac
+            prev=$a
+        done
+        p=$(cd "$p" 2>/dev/null && pwd -P) || p=$PWD
+        case $s in '') pkg_key=$p/.build ;; /*) pkg_key=$s ;; *) pkg_key=$PWD/$s ;; esac ;;
+    esac
+fi
+same_pkg() {
+    [ -n "$pkg_key" ] || return 1
+    for h in "$dir"/holder.*; do
+        [ -f "$h" ] && [ "$(sed -n 's/^key=//p' "$h")" = "$pkg_key" ] || continue
+        pid=$(sed -n 's/^pid=//p' "$h")
+        [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && return 0
+    done
+    return 1
+}
+
+xcode_build_action=0 xcode_test_action=0
+case ${1##*/} in
+xcodebuild)
+    prev=
+    for a in "$@"; do
+        # A flag's value can be spelled like an action: -exportPath build, -scheme test.
+        case $prev in
+        -scheme | -target | -configuration | -project | -workspace | -sdk | -destination | -testPlan | -xcconfig | \
+            -derivedDataPath | -resultBundlePath | -archivePath | -exportPath | -exportOptionsPlist | \
+            -clonedSourcePackagesDirPath | -only-testing | -skip-testing) prev=$a; continue ;;
+        esac
+        prev=$a
+        case $a in
+        build | build-for-testing | archive | analyze) xcode_build_action=1 ;;
+        test) xcode_build_action=1; xcode_test_action=1 ;;
+        test-without-building) xcode_test_action=1 ;;
+        esac
+    done ;;
+esac
+
+# Content-addressed build caches are safe to share between worktrees, so turn them on for every job.
+case ${1##*/} in
+xcodebuild)
+    # shortcut: only when a build action is named, since -exportArchive and friends take no build settings.
+    if [ "$xcode_build_action" -eq 1 ]; then
+        has COMPILATION_CACHE_ENABLE_CACHING "$@" || set -- "$@" COMPILATION_CACHE_ENABLE_CACHING=YES
+    fi ;;
+gradlew | gradle)
+    if ! has --build-cache "$@" && ! has --no-build-cache "$@"; then
+        n=$# ins=0
+        while [ "$n" -gt 0 ]; do
+            arg=$1; shift; n=$((n - 1))
+            if [ "$ins" -eq 0 ] && [ "$arg" = -- ]; then set -- "$@" --build-cache "$arg"; ins=1
+            else set -- "$@" "$arg"; fi
+        done
+        [ "$ins" -eq 1 ] || set -- "$@" --build-cache
+    fi ;;
+esac
+
+# Slot jobs share the machine, so cap each tool's own parallelism unless the caller set it.
+# A solo job has the machine to itself and runs uncapped.
+if [ "$solo" -eq 0 ]; then
+    cpus=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
+    default_jobs=$((cpus / 2)); [ "$default_jobs" -ge 1 ] || default_jobs=1
+    jobs=${BUILD_QUEUE_JOBS:-$default_jobs}
+    case $jobs in '' | 0 | *[!0-9]*) echo 'build-queue: BUILD_QUEUE_JOBS must be a whole number above 0' >&2; exit 64 ;; esac
+    : "${CARGO_BUILD_JOBS:=$jobs}"; export CARGO_BUILD_JOBS
+    case ${1##*/} in
+    xcodebuild)
+        if [ "$xcode_build_action" -eq 1 ] || [ "$xcode_test_action" -eq 1 ]; then
+            has -jobs "$@" || set -- "$@" -jobs "$jobs"
+        fi
+        if [ "$xcode_test_action" -eq 1 ]; then
+            has -maximum-parallel-testing-workers "$@" || has -parallel-testing-worker-count "$@" ||
+                set -- "$@" -maximum-parallel-testing-workers 2
+        fi ;;
+    gradlew | gradle)
+        if ! has --max-workers "$@"; then
+            n=$# ins=0
+            while [ "$n" -gt 0 ]; do
+                arg=$1; shift; n=$((n - 1))
+                if [ "$ins" -eq 0 ] && [ "$arg" = -- ]; then set -- "$@" --max-workers="$jobs" "$arg"; ins=1
+                else set -- "$@" "$arg"; fi
+            done
+            [ "$ins" -eq 1 ] || set -- "$@" --max-workers="$jobs"
+        fi ;;
+    swift)
+        case ${2:-} in
+        build | test)
+            if ! has --jobs "$@" && ! has -j "$@"; then
+                n=$# ins=0
+                while [ "$n" -gt 0 ]; do
+                    arg=$1; shift; n=$((n - 1))
+                    if [ "$ins" -eq 0 ] && [ "$arg" = -- ]; then set -- "$@" --jobs "$jobs" "$arg"; ins=1
+                    else set -- "$@" "$arg"; fi
+                done
+                [ "$ins" -eq 1 ] || set -- "$@" --jobs "$jobs"
+            fi ;;
+        esac ;;
+    esac
+fi
+
+busy=$(describe)
+[ -z "$busy" ] || printf 'build-queue: waiting up to %ss for %s\n%s\n' "$timeout" \
+    "$([ "$solo" -eq 1 ] && echo 'every slot' || echo 'a slot')" "$busy" >&2
+
+# Repo roots for cold-build history: share baseline across git worktrees of this repo, not other repos.
+repo_roots=$(git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' || true)
+[ -n "$repo_roots" ] || repo_roots=$safe_pwd
+
+queued=$(date +%s)
+# Runs under the lock(s). The job is a child, not exec'd, so the wrapper can log
+# its time and exit status and forward signals; the locks outlive the job.
+# $5 lists the slots this job holds, so --status names it in each.
+# shellcheck disable=SC2016 # expanded by the inner sh
+run='
+    queued=$1 dir=$2 log=$3 marker=$4 held=$5; : >"$marker"; shift 5
+    rm -f "$dir/wait.$BUILD_QUEUE_WAITER"  # running now, no longer waiting
+    start=$(date +%s); waited=$((start - queued))
+    [ "$waited" -eq 0 ] || echo "build-queue: started after waiting ${waited}s" >&2
+    for i in $held; do
+        printf "pid=%s\nstarted=%s\ncheckout=%s\ncommand=%s\nkey=%s\n" "$$" "$start" "$BUILD_QUEUE_PWD" "$BUILD_QUEUE_ORIG_CMD" "$BUILD_QUEUE_KEY" >"$dir/holder.$i"
+    done
+    trap "for i in $held; do rm -f \"$dir/holder.\$i\"; done" EXIT
+    BUILD_QUEUE_HELD=$BUILD_QUEUE_MODE "$@" <&0 &
+    child=$!
+    "$BUILD_QUEUE_SELF" --sample "$child" "$marker.peak" </dev/null >/dev/null 2>&1 &
+    sampler=$!
+    # shortcut: a cancel reaches the direct child only, so a wrapper shell'"'"'s children can outlive it.
+    # A separate process group would fix that but stop jobs that read the terminal (SIGTTIN).
+    trap "kill -TERM \$child 2>/dev/null" INT TERM HUP
+    wait "$child"; status=$?
+    while kill -0 "$child" 2>/dev/null; do wait "$child"; status=$?; done
+    kill "$sampler" 2>/dev/null; wait "$sampler" 2>/dev/null
+    peak=$(cat "$marker.peak" 2>/dev/null || echo 0); rm -f "$marker.peak"
+    ran=$(( $(date +%s) - start ))
+    # Cold: over three times the median of this repo+command'"'"'s last 20 clean runs, and at least a minute slower.
+    usual=$(CMD="$BUILD_QUEUE_ORIG_CMD" ROOTS="$BUILD_QUEUE_REPO_ROOTS" awk -F"\t" '\''
+        BEGIN { n = split(ENVIRON["ROOTS"], r, "\n") }
+        $4 == 0 && $NF == ENVIRON["CMD"] {
+            for (i = 1; i <= n; i++) {
+                if (r[i] != "" && ($9 == r[i] || index($9, r[i] "/") == 1)) { print $3; break }
+            }
+        }
+    '\'' "$log" 2>/dev/null | tail -20 | sort -n | awk "{ a[NR] = \$1 } END { if (NR >= 3) print a[int((NR + 1) / 2)] }")
+    cold=-
+    if [ -n "$usual" ] && [ "$ran" -gt $((usual * 3)) ] && [ $((ran - usual)) -ge "${BUILD_QUEUE_COLD_MIN:-60}" ]; then
+        cold=cold
+        echo "build-queue: cold build (${ran}s, usually ${usual}s): give this checkout a warm build cache before the next run" >&2
+    fi
+    ts=$(date -r "$start" +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -d "@$start" +%Y-%m-%dT%H:%M:%S 2>/dev/null || echo "$start")
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$ts" "$waited" \
+        "$ran" "$status" "$((peak / 1024))" "$BUILD_QUEUE_FREE_AT_START" "$BUILD_QUEUE_MODE" "$cold" "$BUILD_QUEUE_PWD" "$BUILD_QUEUE_ORIG_CMD" >>"$log" 2>/dev/null || true
+    # Cap log growth so cold-build scans stay fast.
+    # shortcut: a row appended by another job during the trim is lost, lock the trim if the log must be exact.
+    if [ "$(wc -l <"$log" 2>/dev/null || echo 0)" -gt 5000 ]; then
+        { head -1 "$log"; tail -n 2000 "$log"; } >"$log.tmp.$$" 2>/dev/null && mv -f "$log.tmp.$$" "$log" 2>/dev/null || rm -f "$log.tmp.$$"
+    fi
+    exit "$status"
+'
+marker=$dir/.ran.$$
+
+# True while a plain job that queued before this one is still waiting for a slot.
+older_waiter() {
+    for f in "$dir"/wait.*; do
+        [ -f "$f" ] || continue
+        pid=${f##*.}
+        if ! kill -0 "$pid" 2>/dev/null; then rm -f "$f"; continue; fi
+        ts=$(cat "$f" 2>/dev/null || true)
+        case $ts in '' | *[!0-9]*) continue ;; esac
+        [ "$ts" -le "$queued" ] && return 0
+    done
+    return 1
+}
+
+# Resolve script path so --sample works even if invoked via a relative path.
+case $0 in
+/*) self=$0 ;;
+*) self=$(cd "$(dirname "$0")" && pwd)/${0##*/} ;;
+esac
+BUILD_QUEUE_SELF=$self
+BUILD_QUEUE_MODE=$([ "$solo" -eq 1 ] && echo solo || echo slot)
+BUILD_QUEUE_WAITER=$$
+BUILD_QUEUE_ORIG_CMD=$orig_cmd
+BUILD_QUEUE_PWD=$safe_pwd
+BUILD_QUEUE_REPO_ROOTS=$repo_roots
+BUILD_QUEUE_KEY=$pkg_key
+export BUILD_QUEUE_KEY BUILD_QUEUE_SELF BUILD_QUEUE_MODE BUILD_QUEUE_WAITER BUILD_QUEUE_ORIG_CMD BUILD_QUEUE_PWD BUILD_QUEUE_REPO_ROOTS
+
+set +e
+if [ "$solo" -eq 1 ]; then
+    # First let plain jobs that queued earlier go: a stream of solo jobs must not starve them.
+    deadline=$((queued + timeout))
+    while older_waiter; do
+        [ "$(date +%s)" -lt "$deadline" ] || break
+        sleep 1
+    done
+    left=$((deadline - $(date +%s))); [ "$left" -gt 0 ] || left=0
+    BUILD_QUEUE_FREE_AT_START=$(free_pct); export BUILD_QUEUE_FREE_AT_START
+    # Hold the gate so no new job starts, then take each slot in order. nest calls
+    # itself once per slot, so every lock is held by a process for the job's lifetime.
+    all="" i=0
+    while [ "$i" -lt "$slots" ]; do all="$all $i"; i=$((i + 1)); done
+    # shellcheck disable=SC2016 # expanded by the inner sh
+    # Each lock waits only for what is left of the one deadline, so BUILD_QUEUE_TIMEOUT bounds the whole wait.
+    nest='s=$1 dir=$2 slots=$3 end=$4 i=$5; shift 5
+        [ "$i" -lt "$slots" ] || exec "$@"
+        t=$((end - $(date +%s))); [ "$t" -gt 0 ] || t=0
+        if [ "$BUILD_QUEUE_LOCKER" = lockf ]; then
+            exec /usr/bin/lockf -s -t "$t" -k "$dir/slot.$i" /bin/sh -c "$s" build-queue "$s" "$dir" "$slots" "$end" $((i + 1)) "$@"
+        elif [ "$t" -eq 0 ]; then
+            exec flock -n -E 75 "$dir/slot.$i" /bin/sh -c "$s" build-queue "$s" "$dir" "$slots" "$end" $((i + 1)) "$@"
+        else
+            exec flock -w "$t" -E 75 "$dir/slot.$i" /bin/sh -c "$s" build-queue "$s" "$dir" "$slots" "$end" $((i + 1)) "$@"
+        fi'
+    lock_exec "$left" "$gate" /bin/sh -c "$nest" build-queue "$nest" "$dir" "$slots" "$deadline" 0 \
+        /bin/sh -c "$run" build-queue "$queued" "$dir" "$log" "$marker" "$all" "$@"
+    status=$?
+else
+    # shortcut: waiters poll once a second instead of queueing in order, so a
+    # long queue is not first-come first-served.
+    deadline=$((queued + timeout))
+    status=75
+    # Register as waiting, so a solo job that queues later lets this one go first.
+    printf '%s\n' "$queued" >"$dir/wait.$$"
+    trap 'rm -f "$dir/wait.$$"' EXIT
+    told=0 told_pkg=0
+    while :; do
+        pct=$(free_pct)
+        # Low memory only holds a job back while another heavy job runs; alone it always starts.
+        # A third job beside two needs twice the headroom.
+        busy=$(busy_count); need=$min_free; [ "$busy" -lt 2 ] || need=$((min_free * 2))
+        if same_pkg; then
+            [ "$told_pkg" -eq 1 ] || echo "build-queue: waiting, without a slot, for the job using $pkg_key" >&2
+            told_pkg=1
+        elif [ "$busy" -gt 0 ] && [ "$busy" -lt "$slots" ] && [ "$pct" -lt "$need" ]; then
+            [ "$told" -eq 1 ] || echo "build-queue: waiting for memory (${pct}% free, starting beside ${busy} running needs ${need}%)" >&2
+            told=1
+        elif free "$gate"; then
+            BUILD_QUEUE_FREE_AT_START=$pct; export BUILD_QUEUE_FREE_AT_START
+            i=0
+            while [ "$i" -lt "$slots" ]; do
+                lock_exec 0 "$dir/slot.$i" /bin/sh -c "$run" build-queue "$queued" "$dir" "$log" "$marker" "$i" "$@"
+                status=$?
+                [ ! -f "$marker" ] || break 2
+                # Re-check memory before advancing: another waiter may have just filled a slot.
+                busy=$(busy_count); need=$min_free; [ "$busy" -lt 2 ] || need=$((min_free * 2))
+                if [ "$busy" -gt 0 ] && [ "$busy" -lt "$slots" ] && [ "$pct" -lt "$need" ]; then
+                    [ "$told" -eq 1 ] || echo "build-queue: waiting for memory (${pct}% free, starting beside ${busy} running needs ${need}%)" >&2
+                    told=1
+                    break
+                fi
+                i=$((i + 1))
+            done
+        fi
+        [ "$(date +%s)" -lt "$deadline" ] || break
+        sleep 1
+    done
+fi
+ran=0; [ ! -f "$marker" ] || ran=1; rm -f "$marker"
+# lockf/flock exits 75 (EX_TEMPFAIL) when the wait timed out; the marker proves whether the job ran.
+if [ "$ran" -eq 0 ]; then
+    status=75
+    printf 'build-queue: skipped after %ss\n%s\n' "$timeout" "$(describe)" >&2
+    # Skips are logged too, so the log shows what waiting really cost.
+    qts=$(date -r "$queued" +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -d "@$queued" +%Y-%m-%dT%H:%M:%S 2>/dev/null || echo "$queued")
+    printf '%s\t%s\t0\tskip\t0\t%s\t%s\t-\t%s\t%s\n' "$qts" \
+        "$(( $(date +%s) - queued ))" "$(free_pct)" "$BUILD_QUEUE_MODE" "$safe_pwd" "$orig_cmd" >>"$log" 2>/dev/null || true
+fi
+exit "$status"

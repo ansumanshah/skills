@@ -1,0 +1,7 @@
+{
+  "name": "ansumanshah",
+  "interface": { "displayName": "Ansuman Shah" },
+  "plugins": [
+    { "name": "parallel-agents", "source": { "source": "local", "path": "./" }, "category": "Developer Tools" }
+  ]
+}

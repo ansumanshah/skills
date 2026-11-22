@@ -1,0 +1,5 @@
+{
+  "name": "parallel-agents",
+  "version": "0.1.0",
+  "description": "Run parallel coding agents, check the real app, take changes to a merged PR with multi-model review, and settle plans before you build."
+}

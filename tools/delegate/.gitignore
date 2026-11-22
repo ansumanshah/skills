@@ -1,0 +1,5 @@
+node_modules/
+bin/
+native/*.o
+native/*.a
+.test-runs/

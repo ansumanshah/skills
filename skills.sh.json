@@ -1,0 +1,41 @@
+{
+  "$schema": "https://skills.sh/schemas/skills.sh.schema.json",
+  "notGrouped": "bottom",
+  "groupings": [
+    {
+      "title": "Running agents",
+      "description": "Parallel coding agents on one machine.",
+      "skills": [
+        "delegate",
+        "build-queue",
+        "ui-qa"
+      ]
+    },
+    {
+      "title": "Shipping PRs",
+      "description": "Prove, review, file and land pull requests.",
+      "skills": [
+        "ship-pr",
+        "ready-pr",
+        "panel-review",
+        "second-opinion",
+        "open-pr",
+        "watch-pr",
+        "take-over",
+        "stale-pr",
+        "reply-pr",
+        "repo-cleanup"
+      ]
+    },
+    {
+      "title": "Think and write",
+      "description": "Settle plans, test first, hand people the steps only they can do.",
+      "skills": [
+        "grill",
+        "tdd",
+        "human-steps",
+        "skill-writing"
+      ]
+    }
+  ]
+}

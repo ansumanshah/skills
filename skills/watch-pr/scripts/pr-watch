@@ -1,0 +1,473 @@
+#!/usr/bin/env python3
+"""Watch a GitHub pull request and print one short line per new event.
+
+Usage: pr-watch <number|PR URL> [--repo owner/name]
+                [--until green|ready|change] [--every SECONDS]
+
+Defaults: --until green, --every 30 (minimum 10).
+Green waits for stable passing checks. Ready also waits for review bots and
+requires resolved threads, current base, and no requested changes.
+Change stops after a poll prints an event. Existing events are quiet on first run.
+
+Exit codes: 0 condition met or merged; 1 action needed or 10 failed polls;
+2 bad arguments, unknown PR, or another watcher holds the PR lock.
+Requires macOS, Linux or WSL (it locks with fcntl), Python 3.9+ and an authenticated gh CLI. Diagnostics go to stderr.
+"""
+
+import argparse
+from collections import Counter
+from contextlib import contextmanager
+import fcntl
+import json
+import math
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from urllib.parse import quote, urlparse
+
+
+NO_CHECKS_GRACE = 90
+STATE_MAX_AGE = 7 * 24 * 60 * 60
+VIEW_FIELDS = ("state,headRefOid,baseRefName,mergeStateStatus,reviewDecision,"
+               "author,comments,reviews,url")
+THREAD_QUERY = """query($owner:String!,$name:String!,$number:Int!){
+  repository(owner:$owner,name:$name){pullRequest(number:$number){
+    reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved comments(first:50){
+      pageInfo{hasNextPage} nodes{id author{login} body url}
+    }}}
+  }}
+}"""
+TRANSIENT = re.compile(
+    r"\b5\d\d\b|\b429\b|timed?\s*out|timeout|connection|"
+    r"temporary|temporarily|unexpected eof|tls handshake|deadline exceeded|network is unreachable|"
+    r"no such host|could not resolve", re.I)
+UNKNOWN_PR = re.compile(
+    r"could not resolve to a pullrequest|no pull requests? found|"
+    r"pull request .*(?:not found|does not exist)", re.I)
+
+
+class GitHubError(Exception):
+    def __init__(self, message, unknown=False):
+        super().__init__(message)
+        self.unknown = unknown
+
+
+class LockHeld(Exception):
+    pass
+
+
+def short(value, limit=None):
+    return " ".join(str(value or "").split())[:limit]
+
+
+def bot_check(name):
+    return any(bot in name.casefold()
+               for bot in ("greptile", "macroscope", "coderabbit"))
+
+
+def bucket(check):
+    value = check.get("bucket", "").casefold()
+    if value:
+        return value
+    state = check.get("state", "").upper()
+    if state in {"SUCCESS", "NEUTRAL", "SKIPPED"}:
+        return "pass" if state == "SUCCESS" else "skipping"
+    if state in {"FAILURE", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"}:
+        return "fail"
+    if state in {"CANCELLED", "CANCELED"}:
+        return "cancel"
+    return "pending"
+
+
+def finished(check):
+    return bucket(check) in {"pass", "skipping", "fail", "cancel"}
+
+
+def ignored_author(login, author, viewer):
+    login = login.casefold()
+    if login in {author.casefold(), viewer.casefold()}:
+        return True
+    # Review bots are useful to agents, even when their account ends in [bot].
+    if bot_check(login):
+        return False
+    return (login.endswith("[bot]") or login in {
+        "github-actions", "vercel", "netlify", "dependabot", "renovate",
+        "codecov", "coveralls", "circleci", "travis-ci", "azure-pipelines",
+    })
+
+
+def comment_events(snapshot):
+    author = (snapshot.get("author") or {}).get("login", "")
+    viewer = snapshot.get("viewer", "")
+    sources = [("comment", snapshot.get("comments", [])),
+               ("review", snapshot.get("reviews", []))]
+    for thread in snapshot.get("threads", []):
+        sources.append(("thread-comment", thread.get("comments", [])))
+    for kind, comments in sources:
+        for comment in comments:
+            login = (comment.get("author") or {}).get("login", "ghost")
+            state = comment.get("state", "").upper()
+            identity = comment.get("id") or comment.get("url")
+            if not identity:
+                continue
+            eligible = not ignored_author(login, author, viewer)
+            if kind == "review" and state not in {
+                    "APPROVED", "CHANGES_REQUESTED"} and not comment.get("body", "").strip():
+                eligible = False
+            label = kind if kind != "review" else f"review {state.lower() or 'commented'}"
+            line = f"{label} by {short(login)}: {short(comment.get('url'))}"
+            yield f"{kind}:{identity}", line, eligible
+
+
+def evaluate(snapshot, memory, until, now):
+    """Evaluate one plain snapshot with no I/O; update caller-owned memory.
+
+    Snapshot combines gh pr view fields with checks, threads (flat comments),
+    required (names), and viewer. Only seen/initialized persist across launches.
+    """
+    baseline = not memory.get("initialized", False)
+    seen = set(memory.get("seen", []))
+    lines = []
+
+    def event(key, line, historical=True, quiet=False):
+        if key not in seen:
+            seen.add(key)
+            if not quiet and (not baseline or not historical):
+                lines.append(line)
+
+    head = snapshot["headRefOid"]
+    checks = snapshot.get("checks", [])
+    required = set(snapshot.get("required", []))
+    gating = [check for check in checks
+              if check["name"] in required] if required else [
+                  check for check in checks if not bot_check(check["name"])]
+    signature = sorted((check["name"], check.get("state", ""), bucket(check))
+                       for check in checks)
+    if memory.get("head") != head:
+        memory.update(head=head, head_since=now, signature=None)
+    stable = memory.get("signature") == signature
+    memory["signature"] = signature
+    failed = [check for check in gating if bucket(check) in {"fail", "cancel"}]
+    for check in failed:
+        event(f"failure:{head}:{check['name']}",
+              f"check failed: {short(check['name'])} {short(check.get('link'))}".rstrip())
+    for check in checks:
+        if bot_check(check["name"]) and check not in gating and finished(check):
+            event(f"advisory:{head}:{check['name']}",
+                  f"review check {bucket(check)}: {short(check['name'])} "
+                  f"{short(check.get('link'))}".rstrip())
+    if checks and all(finished(check) for check in checks):
+        counts = Counter(bucket(check) for check in checks)
+        summary = ", ".join(f"{counts[value]} {value}"
+                            for value in ("pass", "skipping", "fail", "cancel")
+                            if counts[value])
+        event(f"finished:{head}", f"checks finished on {short(head, 12)}: {summary}")
+    for key, line, eligible in comment_events(snapshot):
+        event(key, line, quiet=not eligible)
+
+    merge = snapshot.get("mergeStateStatus", "")
+    if merge in {"BEHIND", "DIRTY"}:
+        event(f"merge:{head}:{merge}",
+              f"merge state {merge}: {short(snapshot.get('url'))}")
+    state = snapshot.get("state", "OPEN")
+    if state in {"MERGED", "CLOSED"}:
+        event(state.lower(), f"PR {state.lower()}: {short(snapshot.get('url'))}")
+
+    blocked = False
+    if until == "ready" and state == "OPEN":
+        for thread in snapshot.get("threads", []):
+            if thread.get("isResolved", False):
+                continue
+            comments = thread.get("comments", [])
+            url = next((c.get("url") for c in comments if c.get("url")),
+                       snapshot.get("url", ""))
+            # This is an actionable condition, not replayed comment history.
+            event(f"unresolved:{url}", f"ready blocked: unresolved thread {short(url)}",
+                  historical=False)
+            blocked = True
+        if snapshot.get("reviewDecision") == "CHANGES_REQUESTED":
+            event(f"changes-requested:{head}",
+                  f"ready blocked: changes requested {short(snapshot.get('url'))}",
+                  historical=False)
+            blocked = True
+        if snapshot.get("truncated"):
+            event(f"truncated:{head}",
+                  f"ready blocked: more review threads than pr-watch reads, check them on GitHub "
+                  f"{short(snapshot.get('url'))}", historical=False)
+            blocked = True
+        blocked = blocked or merge == "BEHIND"
+
+    memory.update(seen=sorted(seen), initialized=True)
+    if state == "MERGED":
+        memory["reason"] = f"PR merged: {short(snapshot.get('url'))}"
+        return lines, 0
+    if until == "change" and lines:
+        return lines, 0
+    if state == "CLOSED" or failed or merge == "DIRTY" or blocked:
+        # An exit always says why (on stderr), even when the cause is baseline history or already reported.
+        memory["reason"] = blocking_reason(snapshot, failed, merge)
+        return lines, 1
+
+    names = {check["name"] for check in checks}
+    green = (required <= names and all(bucket(c) in {"pass", "skipping"} for c in gating)
+             and stable)
+    if not checks:
+        green = green and now - memory["head_since"] >= NO_CHECKS_GRACE
+    bots_done = all(finished(c) for c in checks
+                    if any(bot in c["name"].casefold() for bot in ("greptile", "macroscope")))
+    if green and (until == "green" or until == "ready" and bots_done and merge != "UNKNOWN"):
+        return lines, 0
+    return lines, None
+
+
+def blocking_reason(snapshot, failed, merge):
+    url = short(snapshot.get("url"))
+    if snapshot.get("state") == "CLOSED":
+        return f"PR closed: {url}"
+    if failed:
+        return "still failing: " + ", ".join(short(check["name"]) for check in failed)
+    if merge == "DIRTY":
+        return f"merge state DIRTY: {url}"
+    return f"ready blocked: {url}"
+
+
+def gh(args, allowed=(0,), empty_checks=False):
+    """Run gh with bounded retries, never through a shell."""
+    for attempt in range(4):
+        try:
+            result = subprocess.run(["gh", *args], capture_output=True,
+                                    text=True, timeout=60, check=False)
+        except subprocess.TimeoutExpired:
+            result = subprocess.CompletedProcess(args, 124, "", "gh timed out")
+        except OSError as error:
+            raise GitHubError(str(error)) from error
+        error = result.stderr.strip()
+        if result.returncode and TRANSIENT.search(error) and attempt < 3:
+            delay = 2 ** (attempt + 1)
+            print(f"gh retry in {delay}s: {short(error, 160)}", file=sys.stderr, flush=True)
+            time.sleep(delay)
+            continue
+        if empty_checks and any(message.lstrip().casefold().startswith("no checks reported")
+                                for message in (result.stdout, error)):
+            return "[]"
+        if result.returncode not in allowed or result.returncode and TRANSIENT.search(error):
+            message = error or result.stdout.strip() or f"gh exited {result.returncode}"
+            raise GitHubError(message, bool(UNKNOWN_PR.search(message)))
+        return result.stdout
+
+
+def gh_json(args, **kwargs):
+    try:
+        return json.loads(gh(args, **kwargs))
+    except json.JSONDecodeError as error:
+        raise GitHubError(f"invalid JSON from gh: {error}") from error
+
+
+def required_checks(repo, base):
+    """Required check names from classic branch protection plus repository and organization rulesets."""
+    branch = quote(base, safe='')
+    try:
+        contexts = gh_json(["api", f"repos/{repo}/branches/{branch}/protection/required_status_checks",
+                            "--jq", "[(.contexts // [])[], (.checks // [])[].context] | unique"])
+    except GitHubError as error:
+        if not re.search(r"\b(?:403|404)\b", str(error)):
+            raise
+        contexts = []
+    if not isinstance(contexts, list) or not all(isinstance(c, str) for c in contexts):
+        raise GitHubError("invalid required checks response")
+    try:
+        ruled = gh(["api", "--paginate", f"repos/{repo}/rules/branches/{branch}", "--jq",
+                    '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context'])
+    except GitHubError as error:
+        if not re.search(r"\b(?:403|404)\b", str(error)):
+            raise
+        ruled = ""
+    return sorted(set(contexts) | {line.strip() for line in ruled.splitlines() if line.strip()})
+
+
+def view_pr(repo, number):
+    view = gh_json(["pr", "view", str(number), "-R", repo, "--json", VIEW_FIELDS])
+    if not isinstance(view, dict) or not view.get("headRefOid") or not view.get("baseRefName"):
+        raise GitHubError("incomplete PR response from gh")
+    return view
+
+
+def fetch_snapshot(repo, number, view, viewer, required):
+    checks = gh_json(["pr", "checks", str(number), "-R", repo, "--json",
+                      "name,bucket,link,state"], allowed=(0, 1, 8), empty_checks=True)
+    owner, name = repo.split("/")
+    data = gh_json(["api", "graphql", "-f", f"query={THREAD_QUERY}",
+                    "-f", f"owner={owner}", "-f", f"name={name}",
+                    "-F", f"number={number}"])
+    try:
+        if data.get("errors"):
+            raise ValueError(short(data["errors"], 160))
+        connection = data["data"]["repository"]["pullRequest"]["reviewThreads"]
+        threads = connection["nodes"]
+        if not isinstance(checks, list) or not isinstance(threads, list):
+            raise ValueError("checks and threads must be lists")
+        # More threads or comments than one query returns: ready must fail closed, never pass on a partial view.
+        truncated = bool((connection.get("pageInfo") or {}).get("hasNextPage")) or any(
+            (thread["comments"].get("pageInfo") or {}).get("hasNextPage") for thread in threads)
+        threads = [dict(thread, comments=thread["comments"]["nodes"]) for thread in threads]
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        raise GitHubError(f"incomplete GitHub poll: {error}") from error
+    return dict(view, checks=checks, threads=threads, viewer=viewer, required=required,
+                truncated=truncated)
+
+
+def state_path(repo, number):
+    root = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+    return root / "pr-watch" / f"{repo.replace('/', '__').lower()}__{number}.json"
+
+
+def load_state(path, now):
+    try:
+        if now - path.stat().st_mtime > STATE_MAX_AGE:
+            return {}
+        state = json.loads(path.read_text())
+        if (isinstance(state, dict) and state.get("initialized") is True
+                and isinstance(state.get("seen"), list)
+                and all(isinstance(key, str) for key in state["seen"])):
+            return {"seen": state["seen"], "initialized": True}
+    except (FileNotFoundError, ValueError):
+        pass
+    return {}
+
+
+def save_state(path, memory):
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent,
+                                         prefix=path.name + ".", delete=False) as stream:
+            temporary = stream.name
+            json.dump({"initialized": True, "seen": memory["seen"]}, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+@contextmanager
+def hold_lock(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.with_suffix(".lock").open("a+") as stream:
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            stream.seek(0)
+            pid = stream.read().strip() or "unknown"
+            raise LockHeld(f"another pr-watch holds this PR (pid {pid})") from error
+        stream.seek(0)
+        stream.truncate()
+        stream.write(str(os.getpid()))
+        stream.flush()
+        try:
+            yield
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("pr", help="PR number or https://github.com/owner/repo/pull/N")
+    parser.add_argument("--repo", help="owner/name")
+    parser.add_argument("--until", choices=("green", "ready", "change"), default="green")
+    parser.add_argument("--every", type=float, default=30, help="poll interval, minimum 10 seconds")
+    args = parser.parse_args(argv)
+    if not math.isfinite(args.every) or args.every < 10:
+        parser.error("--every must be at least 10 seconds")
+    if not re.fullmatch(r"[0-9]+", args.pr):
+        url = urlparse(args.pr)
+        match = re.fullmatch(r"/([^/]+)/([^/]+)/pull/([0-9]+)(?:/(?:files|commits|checks))?/?", url.path)
+        if url.scheme != "https" or url.netloc.casefold() != "github.com" or not match:
+            parser.error("expected a PR number or a GitHub PR URL")
+        args.repo = f"{match[1]}/{match[2]}"
+        args.pr = match[3]
+    try:
+        args.pr = int(args.pr)
+    except ValueError:
+        parser.error("PR number is too large")
+    if args.pr < 1:
+        parser.error("PR number must be positive")
+    if args.repo is not None and (not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", args.repo)
+                                  or args.repo.split("/")[1] in {".", ".."}):
+        parser.error("--repo must be owner/name")
+    return args
+
+
+def watch(args, path):
+    memory = load_state(path, time.time())
+    viewer = None
+    required = {}
+    failures = 0
+    while True:
+        try:
+            # Setup calls are cached. After setup each complete poll uses three calls.
+            if viewer is None:
+                login = gh(["api", "user", "--jq", ".login"]).strip()
+                if not login:
+                    raise GitHubError("GitHub returned an empty viewer login")
+                viewer = login
+            view = view_pr(args.repo, args.pr)
+            base = view["baseRefName"]
+            if base not in required:
+                required[base] = required_checks(args.repo, base)
+                # Fetch protection separately so a poll never needs four calls.
+                continue
+            snapshot = fetch_snapshot(args.repo, args.pr, view, viewer, required[base])
+        except GitHubError as error:
+            if error.unknown:
+                print(f"unknown PR: {short(error, 160)}", file=sys.stderr, flush=True)
+                return 2
+            failures += 1
+            print(f"GitHub poll failed ({failures}/10): {short(error, 160)}", file=sys.stderr, flush=True)
+            if failures == 10:
+                return 1
+            # An unsuccessful poll must not count toward consecutive CI stability.
+            memory["signature"] = None
+            time.sleep(args.every)
+            continue
+        failures = 0
+        lines, code = evaluate(snapshot, memory, args.until, time.monotonic())
+        for line in lines:
+            print(line, flush=True)
+        if code is not None and not lines and memory.get("reason"):
+            print(f"pr-watch: {memory['reason']}", file=sys.stderr, flush=True)
+        save_state(path, memory)
+        if code is not None:
+            return code
+        time.sleep(args.every)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    try:
+        if not args.repo:
+            info = gh_json(["repo", "view", "--json", "nameWithOwner"])
+            args.repo = info.get("nameWithOwner", "") if isinstance(info, dict) else ""
+            if not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", args.repo):
+                raise GitHubError("gh repo view returned an invalid repository")
+        path = state_path(args.repo, args.pr)
+        with hold_lock(path):
+            return watch(args, path)
+    except LockHeld as error:
+        print(str(error), file=sys.stderr, flush=True)
+        return 2
+    except (GitHubError, OSError) as error:
+        print(f"pr-watch: {short(error, 160)}", file=sys.stderr, flush=True)
+        return 2 if isinstance(error, GitHubError) and error.unknown else 1
+    except KeyboardInterrupt:
+        print("pr-watch: interrupted", file=sys.stderr, flush=True)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

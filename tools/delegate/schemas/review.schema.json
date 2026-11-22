@@ -1,0 +1,9 @@
+{"type":"object","additionalProperties":false,"required":["status","summary","questions","findings"],
+ "properties":{"status":{"type":"string","enum":["done","partial","blocked","needs_input"]},
+  "summary":{"type":"string"},
+  "questions":{"type":"array","items":{"type":"string"},"description":"Decisions for the user. Use an empty array when there are no questions."},
+  "findings":{"type":"array","items":{"type":"object","additionalProperties":false,
+    "required":["severity","file","line","problem","failure_scenario","fix"],
+    "properties":{"severity":{"type":"string","enum":["critical","high","medium","low"]},
+     "file":{"type":"string"},"line":{"type":"integer"},"problem":{"type":"string"},
+     "failure_scenario":{"type":"string"},"fix":{"type":"string"}}}}}}

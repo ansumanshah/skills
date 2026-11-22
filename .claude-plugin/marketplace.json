@@ -1,0 +1,7 @@
+{
+  "name": "ansumanshah",
+  "owner": { "name": "Ansuman Shah" },
+  "plugins": [
+    { "name": "parallel-agents", "source": "./", "description": "Run parallel coding agents, check the real app, take changes to a merged PR with multi-model review, and settle plans before you build." }
+  ]
+}
