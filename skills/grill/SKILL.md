@@ -12,8 +12,8 @@ Make that a root decision. Recommend a problem and outcome, with a reason.
 Record each decision with an ID, prerequisites, status, and answer.
 Record explicit choices already made as settled. Turn remaining assumptions into open nodes.
 Attach prerequisites before asking about scope, constraints, tradeoffs, or success checks.
-Define the askable set as every open decision whose prerequisites are settled.
 Treat unresolved facts as prerequisites too.
+The askable set is every open decision whose prerequisites are settled.
 Finish this step when every known open choice has a node and dependencies.
 
 ## Own the fact finding
@@ -27,7 +27,7 @@ Finish each lookup by recording its source and settling the factual prerequisite
 
 ## Ask one complete round
 
-Snapshot the whole askable set. Ask every question in it in one numbered round.
+Ask the whole askable set in one numbered round.
 Give each question a short title, real options where available, and a recommendation.
 Put the recommendation in the question so that "yes" accepts it.
 Give one line of reasoning for each recommendation.

@@ -1,11 +1,11 @@
 ---
 name: ship-pr
-description: Take a change from working tree to a merged PR with no supervision, with proof, review, CI, and a merge gate. Use only when the user clearly says to ship or land it while they are away. Triggers on "ship it", "land this", "ship this PR", "merge it when green, I'm away", "take this all the way to merged". Grants merge after the gate passes. For everything but the merge, use ready-pr.
+description: Take a change from working tree to a merged PR with no supervision. Use only when the user clearly says to ship or land it while they are away. Triggers on "ship it", "land this", "ship this PR", "merge it when green, I'm away", "take this all the way to merged". Grants merge after the gate passes; to stop before the merge, use ready-pr.
 ---
 
 # ship-pr
 
-Run end to end and finish with a merged PR. If the user wants everything except the merge, use [ready-pr](../ready-pr).
+Run end to end and finish with a merged PR. If the user wants everything except the merge, use [ready-pr](../ready-pr), which reuses these steps.
 
 ## Grants
 
@@ -24,9 +24,9 @@ You may not:
 
 1. Finish the change with the smallest diff. Start on a branch, or in a worktree inside the repo.
 2. Prove it (see Proof).
-3. Review with [second-opinion](../second-opinion). Use [panel-review](../panel-review) for security, auth, payments, or data loss.
+3. Review with [second-opinion](../second-opinion). Use it in panel mode for security, auth, payments, or data loss.
 4. Rebase on the base branch. Open the PR with [open-pr](../open-pr).
-5. Watch with [watch-pr](../watch-pr). Prove each fix you push.
+5. Watch with [watch-pr](../watch-pr) using `--until ready`. Prove each fix you push.
 6. Merge when the gate passes.
 7. Report: PR link, merge commit, proof, and every decision you made.
 
@@ -50,9 +50,10 @@ All of these must hold:
 - Bots are done, and each finding is fixed or answered.
 - The independent review approved, or every blocker and should finding it raised is fixed or disproved with evidence. A review that ran out of rounds with open findings stops the merge.
 - No human has requested changes.
-- The PR is up to date with its base and mergeable.
+- The PR is up to date with its base and mergeable. Refuse to merge when its state is BEHIND or DIRTY.
+- The base gained no commits touching the same files since the last green run. If it did, rebase and wait for green again.
 
-Merge the way the repo does. Never use admin bypass. Fetch and recheck right before you merge.
+Merge the way the repo does: check the allowed merge methods and recent merged PRs. Never use admin bypass. Fetch the base and PR head again and recheck status, mergeability, and reviews on the live PR right before you merge.
 
 ## When to ask
 

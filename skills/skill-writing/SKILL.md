@@ -1,6 +1,6 @@
 ---
 name: skill-writing
-description: Write agent instructions in SKILL.md, AGENTS.md, CLAUDE.md, and their linked docs. Use when creating or editing a skill, writing or trimming AGENTS.md or CLAUDE.md, fixing missed triggers, fixing unwanted triggers, or fixing inconsistent skill execution.
+description: Write agent instructions in SKILL.md, AGENTS.md, CLAUDE.md, and their linked docs. Use when creating or editing a skill, writing or trimming AGENTS.md or CLAUDE.md, or fixing a skill that misses triggers, triggers wrongly, or runs inconsistently.
 ---
 
 # Skill writing
@@ -18,8 +18,8 @@ Finish when each intended case has one clear trigger and each word helps routing
 Use model invocation when the agent or another skill must discover the skill itself.
 Give that skill an agent-facing description with its triggering cases.
 Use `disable-model-invocation: true` when only a person should type the invocation.
-Give that version a human-facing one-line description; it costs no automatic context.
-Check the target harness: Claude Code, Codex, Gemini CLI, and Cursor differ.
+Give that version a human-facing one-line description. In Claude Code this hides the description from automatic context; other harnesses may still load it.
+Check the target harness's docs for which frontmatter fields it reads and whether it auto-triggers from the description.
 Finish when the chosen mode and its context behavior match that harness.
 
 ## Order content by need
@@ -29,6 +29,8 @@ Move detail needed by only some cases to a sibling file.
 Link it relatively at the relevant step and say when to read it.
 Keep each concept's rule, example, and caveat together under one heading.
 Long files dilute attention even when every line is true.
+Aim for a SKILL.md body under about 600 words and never over about 1,200, and a description under about 350 characters.
+Move optional detail to a linked file with a line saying when to read it.
 Finish when the common path reads in order and each optional branch has a clear link.
 
 ## Give each step a finish line
@@ -55,12 +57,8 @@ Finish when each surviving line changes a decision or preserves needed project k
 
 ## Check before delivery
 
-- Check description triggers against the intended cases.
-- Check every step's done condition.
-- Check file length against the agreed budget; split optional detail when needed.
-- Resolve every relative link.
-- Keep each rule in one place.
+Run each section's finish line. Check the body and description against the length budget and resolve every relative link.
 
 Where the harness permits, try real prompts that should trigger and prompts that should not.
 Inspect which skill actually loads. Revise the pointer and repeat failed cases.
-Finish when the checklist passes and any unavailable invocation checks are reported.
+Finish when every finish line passes and any unavailable invocation checks are reported.

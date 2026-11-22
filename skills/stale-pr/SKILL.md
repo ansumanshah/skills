@@ -1,6 +1,6 @@
 ---
 name: stale-pr
-description: Bring an old pull request up to date and judge whether it should still exist. Triggers on "refresh this PR", "rebase this old PR", "is this PR still relevant", "update the stale PR", "should we close this PR", "revive PR 123". Returns a verdict of REFRESH, REWORK, or CLOSE. Rebases and pushes only when the user asked to update the PR; a question about relevance stays read-only.
+description: Judge whether an old pull request that fell behind its base should still exist, and refresh it if so. Triggers on "refresh this PR", "rebase this old PR", "is this PR still relevant", "update the stale PR", "should we close this PR", "revive PR 123". A question about relevance stays read-only.
 ---
 
 # stale-pr
@@ -9,9 +9,9 @@ Update an old PR, and decide if it should live. Post comments only when asked, t
 
 ## Rules
 
-- Fetch the latest of every branch involved.
+- Fetch the base (`git fetch origin <base>`) and the PR head (`git fetch origin pull/<n>/head`, which also covers fork PRs).
 - Treat existing worktree changes as the user's. When you need a checkout, use a disposable worktree inside the repo.
-- Refreshing permits rebase and push of the PR branch only. It does not permit merge, close, base change, or scope growth.
+- Refreshing permits rebase and push of the PR's own branch only, unless a caller such as [take-over](../take-over) says otherwise. It does not permit merge, close, base change, or scope growth.
 - Push with `--force-with-lease` set to the head SHA you recorded before the rebase.
 
 ## Steps
@@ -22,12 +22,12 @@ Update an old PR, and decide if it should live. Post comments only when asked, t
    ```
 2. Read everything: diff, description, threads, linked issues.
 3. State its smallest goal in one or two sentences.
-4. See what landed on the base since the branch diverged.
+4. See what landed on the base since the branch diverged. Use the recorded `headRefOid` as `<head>`; a fork PR's branch is not local.
    ```
-   git log --oneline $(git merge-base origin/<base> <head>)..origin/<base> -- <touched paths>
+   git log --oneline $(git merge-base origin/<base> <headRefOid>)..origin/<base> -- <touched paths>
    ```
 5. Search for PRs that replaced or compete with it.
-6. Ask these questions:
+6. Answer each, with evidence, before the verdict:
    - Is the problem already solved?
    - Did interfaces move?
    - Does ownership now overlap with other code?
@@ -51,7 +51,7 @@ Pick one:
 2. Resolve conflicts by current intent and the base's newer rules. On a real design conflict, stop and reconsider the verdict.
 3. Compare old and new with `git range-diff <old-base>..<old-head> <new-base>..<new-head>`.
 4. Run focused checks. Use `build-queue <command>` when installed.
-5. Push with lease to the PR's head repository, not always `origin`. For a fork PR (`isCrossRepository`), push to a remote for `<headRepositoryOwner>/<headRepository>`. That works when you can write to the fork (your own, or you are a collaborator on it) or the author allowed edits from maintainers; if the push is refused, stop and report.
+5. Push with lease to the PR's head repository, not always `origin`. For a fork PR (`isCrossRepository`), push to a remote for `<headRepositoryOwner>/<headRepository>`. That works when you can write to the fork or the author allowed edits from maintainers; if the push is refused, stop and report.
    ```
    git push --force-with-lease=<headRefName>:<recorded-head> <head-remote> HEAD:<headRefName>
    ```

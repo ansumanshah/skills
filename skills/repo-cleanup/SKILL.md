@@ -1,15 +1,15 @@
 ---
 name: repo-cleanup
-description: Wrap up a repo after agent work - show what takes space and what can go, merge finished branches to main, remove merged worktrees and branches, and clear build output, logs, caches and test leftovers. Use when asked to "clean up", "merge to main and clean up", "remove worktrees", "what is taking space in this repo", "free disk space", or to tidy a repo at the end of a task.
+description: Wrap up a repo after agent work: merge finished branches to main, remove merged worktrees and branches, clear build output, logs, caches and test leftovers, and show what is taking space. Use when asked to "clean up", "merge to main and clean up", "remove worktrees", "free disk space", or to tidy a repo at the end of a task.
 ---
 
 # Repo cleanup
 
 Leave the repo with finished work on `main`, no stale worktrees or branches, and no regenerable files. Work inside the current repo unless the user names more. Read the repo's AGENTS.md or CLAUDE.md first: its merge, review and lock rules win over this file.
 
-`main` in this file means the repo's default branch. Find it once with `git symbolic-ref --short refs/remotes/origin/HEAD` (drop the `origin/` prefix) and use that name everywhere below.
+`main` in this file means the repo's default branch. Find it once with `git symbolic-ref --short refs/remotes/origin/HEAD` (drop the `origin/` prefix) and use that name everywhere below. If that fails because `origin/HEAD` was never set, run `git remote set-head origin -a` and retry.
 
-Delete only what is merged or can be regenerated. Anything unmerged, uncommitted or not clearly generated is reported and kept until the user says yes for it by name.
+Delete only what is merged or can be regenerated: build output, caches, logs, test output and merged worktrees. Anything unmerged, uncommitted or not clearly generated is reported and kept until the user says yes for it by name.
 
 ## 1. Survey (read-only)
 
@@ -20,36 +20,16 @@ git log --oneline main..<branch>                 # per branch: commits not on ma
 git -C <worktree> status --short                 # per worktree: uncommitted work
 git -C <worktree> status --short --ignored       # per worktree: ignored files, which worktree removal deletes too
 gh pr list --state merged --head <branch> --json number,mergedAt   # squash or rebase merges git cannot see
-build-queue --status; delegate status                     # jobs or workers still using this repo
+build-queue --status; delegate status             # if installed: jobs or workers still using this repo
 git clean -ndX | head -50                        # ignored files a clean would remove
 du -sh <candidate dirs> 2>/dev/null              # sizes, for the list in step 4
 ```
 
-Then size the repo, so the user sees what takes the space and what can go:
-
-```sh
-du -sh .                                                        # total
-du -sh -- * .[!.]* 2>/dev/null | sort -rh | head -15            # biggest top-level entries
-git ls-files -oi --exclude-standard --directory -z | xargs -0 -r du -sh 2>/dev/null | sort -rh | head -20   # ignored: build output, caches, deps
-git ls-files -o --exclude-standard --directory -z | xargs -0 -r du -sh 2>/dev/null | sort -rh | head -10    # untracked, not ignored: user files
-git count-objects -vH                                           # .git itself (size-pack)
-```
-
-Present a size table, biggest first, with one verdict per row:
-
-| Path | Size | Kind | Verdict |
-|---|---|---|---|
-| `node_modules/` | 1.2G | dependencies | deep clean only, reinstall with the lockfile |
-| `.build/` | 840M | build output | safe, regenerates on next build |
-| `.worktrees/fix-login` | 310M | merged worktree | safe after step 3 |
-| `recordings/` | 95M | untracked, not ignored | keep, ask the user |
-| `.git` | 60M | history | `git gc` can shrink it; never delete |
-
-Kinds: build output, cache, logs or test output, dependencies, worktree, untracked user file, tracked source, history. Only build output, caches, logs, test output and merged worktrees are "safe"; dependencies are "deep clean only"; untracked user files and tracked source are "keep". End the table with the total that the safe rows would free.
+When the user asks what takes space or wants the size table, read [size survey](references/size-survey.md) for the commands and table. Give each row one verdict: "safe" (delete), "deep clean only" (needs the user's ask) or "keep" (report only).
 
 A branch counts as merged when `git branch --merged main` lists it, or when its PR merged and `git diff main...<branch>` is empty or already on main.
 
-Done when you have two tables: each worktree and branch marked merged, unmerged (with commit count) or dirty, and the size table above. Show both to the user before changing anything. When the user only asked what takes space, stop here.
+Done when you have a table of each worktree and branch marked merged, unmerged (with commit count) or dirty, plus the size table if asked. Show it to the user before changing anything. When the user only asked what takes space, stop here.
 
 ## 2. Merge finished work to main
 
@@ -68,7 +48,7 @@ Done when every chosen branch is contained in main and the gate passed on the me
 git worktree remove <path>      # refuses on uncommitted changes: keep that refusal and report it
 git branch -d <branch>          # refuses unmerged branches
 git worktree prune
-delegate prune                     # preview finished lane records; add --yes when the user agrees
+delegate prune                  # if installed: preview finished lane records; add --yes when the user agrees
 ```
 
 `git worktree remove` also deletes the worktree's ignored files without asking, and those can be a `.env`, a local database or hand-made fixtures. Before removing one, check its ignored files from step 1: if any is not build output, a cache, logs or dependencies, list it and keep the worktree until the user says yes for it.

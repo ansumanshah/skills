@@ -76,8 +76,7 @@ Skills run with your agent's permissions. Read one before you install it.
 |---|---|
 | [ship-pr](skills/ship-pr) | Takes a change to a merged PR while you are away: proves it, reviews it, opens it, watches CI, merges. |
 | [ready-pr](skills/ready-pr) | The same, but stops with the PR ready for you to merge. |
-| [second-opinion](skills/second-opinion) | A reviewer from another model provider checks the diff in rounds until you both agree. |
-| [panel-review](skills/panel-review) | Three reviewers from three providers at once, scored each round. For changes that must not break. |
+| [second-opinion](skills/second-opinion) | A reviewer from another model provider checks the diff in rounds until you both agree. Panel mode runs three providers at once and scores each round, for changes that must not break. |
 | [open-pr](skills/open-pr) | A short PR that starts with the problem and ends with a test plan. |
 | [watch-pr](skills/watch-pr) | Watches CI and review bots, fixes what is real and answers what is not. Ships `pr-watch`. |
 | [take-over](skills/take-over) | Finishes someone else's PR, branch or agent session and keeps their credit. |

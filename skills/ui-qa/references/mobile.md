@@ -1,7 +1,5 @@
 # Mobile: iOS Simulator, iPhone, Android
 
-Installed (2026-11-12): agent-device 0.21.36, sim-use 0.16.0, AXe 2.0.3. Not yet benchmarked against each other; agent-device stays the default.
-
 | Tool | Platforms | Pick it for |
 | --- | --- | --- |
 | **agent-device** | iOS, Android, tvOS, macOS, HarmonyOS, physical devices | Default. `open <app> --foreground` starts a session and returns the initial interactive `@refs` (skip a redundant `snapshot`). Use `--settle` on `press`/`click`/`fill`/`scroll`/`back` to act, wait for quiet, and print only the UI diff. Use `wait text "..."` / `wait <selector>` / `wait absent <selector>` instead of polling, and `batch` / `replay` for fixed flows. Run `agent-device help <topic>` for gestures, TV, remote, debugging. |
@@ -18,7 +16,6 @@ Installed (2026-11-12): agent-device 0.21.36, sim-use 0.16.0, AXe 2.0.3. Not yet
 
 ## Rules
 
-- Wrap simulator/emulator boots and full mobile E2E runs in `build-queue --solo` when installed so parallel agents do not fight over one simulator.
 - Don't mix tools mid-flow on one device: refs and aliases are per tool and go stale on any other tool's action.
 - Android: `adb` for install, logcat and shell only. Drive the UI through agent-device or sim-use.
 - Real-keyboard, visualViewport and momentum behaviour in web pages needs Simulator Safari through agent-device, not browser emulation.

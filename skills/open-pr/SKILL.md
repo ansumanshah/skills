@@ -1,6 +1,6 @@
 ---
 name: open-pr
-description: Open a new pull request or update the existing one for the current branch, with a checked diff, a clean title and body, and a test plan. Triggers on "open a PR", "create a pull request", "push and open a PR", "update the PR description", "fix the PR title", "submit this for review". Handles reuse of an existing PR, secret scrubbing, repo title conventions, and the REST fallback when GraphQL is rate limited.
+description: Create a pull request for the current branch, or edit an existing PR's title, body, or test plan. Triggers on "open a PR", "create a pull request", "push and open a PR", "update the PR description", "fix the PR title", "submit this for review".
 ---
 
 # open-pr
@@ -9,7 +9,7 @@ Open or update a PR for the current branch. Post any comment through [reply-pr](
 
 ## Steps
 
-1. Look for an open PR on this branch. Reuse it and update it instead of opening a second one. A merged or closed PR on the same branch is history: open a new PR for the new commits.
+1. Look for an open PR on this branch. Reuse it instead of opening a second one. A merged or closed PR on the same branch is history: open a new PR for the new commits.
    ```
    gh pr list --head <branch> --state open --json number,state,url
    ```
@@ -24,12 +24,8 @@ Open or update a PR for the current branch. Post any comment through [reply-pr](
 
 ## Title
 
-- Check the repo's convention first. Read the last ten merged PR titles.
-  ```
-  gh pr list --state merged --limit 10 --json title
-  ```
-- If the repo has no convention, use `<type>: <description>`.
-- Types: feat, fix, refactor, docs, test, chore, perf, ci.
+- Check the repo's convention first: `gh pr list --state merged --limit 10 --json title`.
+- If the repo has none, use `<type>: <description>` with type feat, fix, refactor, docs, test, chore, perf, or ci.
 - State the effect a user or reader sees, not the mechanism.
   - Weak: `fix: add null check in session loader`
   - Strong: `fix: stop crash when a saved session has no title`
@@ -48,24 +44,28 @@ Write three parts in this order.
 - [ ] Reviewer: check <thing only a human can check>
 ```
 
-Tick items you ran this session. Leave items for the reviewer open. Do not tick what you did not run.
+Tick items you ran this session. Leave items for the reviewer open. Do not tick what you did not run. Add a model credit line only if the repo or the user asks for one.
 
-Add a model credit line only if the repo or the user asks for one.
+## Size
+
+Hold the PR to its goal. Decline these with a reason, and list them as follow-ups:
+
+- extra tests beyond the change
+- guards for rare cases
+- compatibility shims nobody asked for
+- micro-performance edits
+
+Re-run the diff check after every push.
 
 ## Rate limit fallback
 
-If `gh pr create` fails with a GraphQL rate-limit error, use REST with a body file.
+If `gh pr create` fails with a GraphQL rate-limit error, use REST with a body file. `gh api rate_limit` shows when the limit resets.
 
 ```
-gh api repos/{o}/{r}/pulls -f title="<title>" -f head="<branch>" -f base="<base>" -F body=@<file>
+gh api repos/{owner}/{repo}/pulls -f title="<title>" -f head="<branch>" -f base="<base>" -F body=@<file>
 ```
 
-Use `gh api rate_limit` to see when the limit resets.
-
-## Updating
-
-- Edit the title and body with `gh pr edit` or `gh api -X PATCH repos/{o}/{r}/pulls/<n>`.
-- Re-run the diff check after every push. Keep the PR the size of its goal.
+To edit an existing PR use `gh pr edit` or `gh api -X PATCH repos/{owner}/{repo}/pulls/<n>`.
 
 ## Hand off
 

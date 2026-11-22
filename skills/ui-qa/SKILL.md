@@ -1,6 +1,6 @@
 ---
 name: ui-qa
-description: Drive and verify real app UI on any surface - macOS windows (Cua Driver, agent-desktop, Peekaboo), iOS Simulator and iPhone (agent-device, sim-use, AXe), Android emulator and device (agent-device, sim-use), and web (agent-browser). Use for UI QA, "run the app and check it", tapping, typing, screenshots, accessibility reads.
+description: Drive and verify real app UI on macOS, iOS Simulator, iPhone, Android and web, using agent-device, agent-browser or desktop drivers. Use for UI QA, "run the app and check it", tapping, typing, screenshots, accessibility reads.
 ---
 
 # UI QA
@@ -19,14 +19,6 @@ One loop everywhere: resolve the exact target, read narrowly, act by element, ve
 
 Check the chosen CLI with `command -v` on first use. macOS setup and permissions: [first-run setup](references/macos-setup.md).
 
-## Pick by job
-
-| Work | Method |
-| --- | --- |
-| Build, fixtures, logs | Shell or project CLI within task scope. |
-| Operate named controls, read state | Accessibility actions with state checks. |
-| Layout, clipping, custom drawing | Capture of the exact window or screen. |
-
 ## macOS: execute and prove
 
 Define the visible outcome, then resolve the exact executable, PID, and window.
@@ -39,4 +31,4 @@ For UI acceptance, exercise the intended control and verify the result in app st
 
 Keep one controller per desktop and default to background delivery. On a shared machine, isolate web runs with `agent-browser --session <name>` and wrap simulator/emulator boots or full E2E runs in `build-queue --solo` when installed. Refresh stale handles in the same session. On a tool switch, resolve the target again. Ground coordinates in the acting tool's fresh capture. Inspect partial or uncertain effects before another input, and honor permissions and focus limits.
 
-Read [hybrid flows](references/macos-hybrid.md) for batches, scripts, recovery, and measurement. See [capture recipes](references/macos-evidence.md#capture-recipes) and [benchmark results](references/macos-evidence.md#local-results). Check unfamiliar options against the installed tool's help or schema.
+Read [hybrid flows](references/macos-hybrid.md) only for Cua batches, scripts, recovery, or measurement. For per-tool screenshot commands, read [capture recipes](references/macos-evidence.md#capture-recipes). Check unfamiliar options against the installed tool's help or schema.

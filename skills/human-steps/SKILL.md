@@ -45,7 +45,7 @@ Run `bash -n` and `shellcheck`, then `chmod +x` on the generated file.
 Report ShellCheck as unavailable if absent; keep that check outstanding.
 Trace each value statically from prompt to destination against the confirmed scope.
 Match every GitHub secret and variable name to CI and verify the target repository.
-`write_env` writes single-quoted values, which Node dotenv and Docker Compose read literally. python-dotenv still expands `${VAR}` inside single quotes, so for a Python app check the value has no `$` or route it by hand. It refuses a value with a single quote or a newline, and refuses to replace an entry that spans several lines; route those values by hand.
+`write_env` single-quotes values. python-dotenv still expands `${VAR}` inside them, so for a Python app check for `$` in values. It refuses values containing a single quote or newline, and entries that span several lines; enter those by hand.
 Leave execution to the person, including sign-in, value entry, and approvals.
 Give the exact command to run from the agreed directory.
 Finish when static checks pass, all writes match scope, and the user has that command.

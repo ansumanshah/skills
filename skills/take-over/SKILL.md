@@ -1,6 +1,6 @@
 ---
 name: take-over
-description: Finish someone else's unfinished PR, branch, or agent session toward its original goal, keeping their credit. Triggers on "pick up this PR", "finish this branch", "continue where the other agent stopped", "take over this work", "resume the stalled delegate worker", "complete PR 123". Treats the handoff as a lead, verifies it, and ships through open-pr and watch-pr.
+description: Finish someone else's unfinished PR, branch, or agent session toward its original goal, keeping their credit. Triggers on "pick up this PR", "finish this branch", "continue where the other agent stopped", "take over this work", "resume the stalled delegate worker", "complete PR 123".
 ---
 
 # take-over
@@ -11,21 +11,16 @@ Finish work that another person or agent started. Post comments through [reply-p
 
 A handoff note is a claim, not proof. Check it.
 
-1. Read the source: the PR, branch, or session log.
-2. Read every review thread and every later correction from the user.
-3. Find the real current head. Check for uncommitted work in any worktree or session.
-4. For a stalled `delegate` worker, read its output and its diff.
-   ```
-   delegate result <NAME>
-   ```
-5. State the original goal in one or two sentences.
+1. Read the source (PR, branch, or session log), every review thread, and every later correction from the user.
+2. Find the real current head. Check for uncommitted work in any worktree or session.
+3. For a stalled `delegate` worker, read its output and its diff: `delegate result <NAME>`.
+4. State the original goal in one or two sentences.
 
 ## Keep credit
 
-- Preserve authorship on the original commits.
-- Keep co-author trailers.
+- Preserve authorship and co-author trailers on the original commits, through squashes.
 - Name and link the original PR or session in your PR.
-- Keep human credit through squashes. Add trailers only for verified identities. Never invent one.
+- Add trailers only for verified identities. Never invent one.
 
 ## Where to work
 
@@ -35,7 +30,7 @@ A handoff note is a claim, not proof. Check it.
 
 ## Steps
 
-1. Judge and rebase with [stale-pr](../stale-pr), but on your new branch: push to the original PR branch only when the user asked for in-place work. If the verdict is REWORK or CLOSE, stop and report.
+1. Judge and rebase with [stale-pr](../stale-pr) on your new branch, and skip its push step: push to the original PR branch only when the user asked for in-place work. If the verdict is REWORK or CLOSE, stop and report.
 2. Change only what the goal needs.
 3. Recheck the source for movement before you push. The original may have gained commits.
 4. Verify the original failure yourself. Reproduce it, then show the fix.
@@ -46,10 +41,4 @@ A handoff note is a claim, not proof. Check it.
 
 ## Report
 
-Write five short lists:
-
-- Inherited: what you kept from the original.
-- Changed: what you changed and why.
-- Verified: what you saw working, with the command or output.
-- Credit: who is credited and how.
-- Open decisions: what the user must decide.
+Write five short lists: Inherited (kept from the original), Changed (and why), Verified (command or output), Credit (who and how), Open decisions (for the user).

@@ -29,8 +29,7 @@ Finish when the boundaries, behaviors, and test commands are settled.
    On a shared machine, wrap suites in `build-queue` when it is installed.
    Finish when the suite is green, then choose the next behavior and repeat from step 1.
 
-Complete each red-to-green slice before starting another behavior's test.
-Keep tests tied to public outcomes so they survive changes to internal structure.
+Complete each slice before starting another behavior's test.
 
 ## Choose collaborators
 
@@ -43,10 +42,8 @@ Finish when each substitute has a boundary or nondeterminism reason and expectat
 ## Refactor on green
 
 Refactor as its own step after tests pass. Keep behavior fixed and rerun affected tests.
-Finish that step when the suite remains green before beginning another behavior.
+Finish when the suite is green.
 
 ## Report the evidence
 
-Finish when every agreed behavior has a test observed red before its implementation or fix,
-and the full suite is green.
 Report which tests were added, what each guards, the observed red reasons, and suite results.
