@@ -1,6 +1,6 @@
 ---
 name: second-opinion
-description: Review a diff with reviewers from other model providers, in rounds, answering every finding. Use for "second opinion", "cross-review", "review before I push", and high-stakes diffs. "Panel review" or "three-model review" runs three providers at once and scores each round.
+description: Have a different model provider review a diff, in rounds, answering every finding. Use for "second opinion", "cross-review", "have another model review this", and high-stakes diffs. Not for a plain "review my diff" by the current agent. "Panel review" or "three-model review" runs three providers at once and scores each round.
 ---
 
 # second-opinion
