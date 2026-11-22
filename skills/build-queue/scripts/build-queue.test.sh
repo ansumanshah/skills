@@ -72,6 +72,8 @@ for tool in xcodebuild gradlew swift; do printf '#!/bin/sh\necho "$*"\n' >"$bin/
 [ "$(BUILD_QUEUE_JOBS=3 "$bq" "$bin/xcodebuild" -exportArchive)" = "-exportArchive" ] || fail "slot xcodebuild without build action got flags"
 [ "$(BUILD_QUEUE_JOBS=3 "$bq" "$bin/xcodebuild" -exportArchive -exportPath build)" = "-exportArchive -exportPath build" ] || fail "a flag value named like an action got build flags"
 [ "$(BUILD_QUEUE_JOBS=3 "$bq" "$bin/xcodebuild" -scheme test -quiet build)" = "-scheme test -quiet build COMPILATION_CACHE_ENABLE_CACHING=YES -jobs 3" ] || fail "a scheme named test was read as the test action"
+[ "$(BUILD_QUEUE_XCODE_CACHE=/c "$bq" --solo "$bin/xcodebuild" build)" = "build COMPILATION_CACHE_ENABLE_CACHING=YES COMPILATION_CACHE_CAS_PATH=/c" ] || fail "shared Xcode cache folder not passed"
+if BUILD_QUEUE_XCODE_CACHE=rel/c "$bq" --solo "$bin/xcodebuild" build >/dev/null 2>&1; then fail "a relative Xcode cache folder was accepted"; fi
 [ "$(BUILD_QUEUE_JOBS=3 "$bq" "$bin/xcodebuild" build)" = "build COMPILATION_CACHE_ENABLE_CACHING=YES -jobs 3" ] || fail "xcodebuild build got test worker flag"
 [ "$(BUILD_QUEUE_JOBS=3 "$bq" "$bin/xcodebuild" test-without-building)" = "test-without-building -jobs 3 -maximum-parallel-testing-workers 2" ] || fail "xcodebuild test-without-building not capped"
 [ "$(BUILD_QUEUE_JOBS=3 "$bq" "$bin/gradlew" test -- --foo)" = "test --build-cache --max-workers=3 -- --foo" ] || fail "gradle flags placed after --"
@@ -138,7 +140,7 @@ other=$BUILD_QUEUE_STATE_DIR/other-dir; mkdir -p "$other"
 
 # Verify log has header + all expected runs and skips.
 rows=$("$bq" --log 100 | wc -l)
-[ "$rows" -eq 53 ] || fail "log should hold header + 52 rows, has $rows"
+[ "$rows" -eq 54 ] || fail "log should hold header + 53 rows, has $rows"
 [ "$(grep -c "$(printf '\tskip\t')" "$BUILD_QUEUE_STATE_DIR/log.tsv")" -eq 6 ] || fail "skips are not logged"
 grep -q "$(printf '\tsolo\t')" "$BUILD_QUEUE_STATE_DIR/log.tsv" || fail "solo runs are not marked"
 echo "ok: build-queue"

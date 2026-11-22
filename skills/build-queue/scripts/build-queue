@@ -16,6 +16,8 @@
 #                  the command with exit 75 and a "build-queue: skipped" line; agents
 #                  that must queue pass --wait (or set 1800) and run in the background.
 # BUILD_QUEUE_SLOTS      jobs that may run at once (default 3; the third needs twice BUILD_QUEUE_MIN_FREE).
+# BUILD_QUEUE_XCODE_CACHE  folder for one Xcode compilation cache shared by every checkout (default: off,
+#                        Xcode keeps a cache per DerivedData folder)
 # BUILD_QUEUE_JOBS       parallelism cap for slot jobs (default half the cores, min 1), added
 #                  to xcodebuild, gradlew, swift build/test and cargo unless set.
 # BUILD_QUEUE_MIN_FREE   free memory % needed to start beside a running job (default 20).
@@ -237,6 +239,11 @@ xcodebuild)
     # shortcut: only when a build action is named, since -exportArchive and friends take no build settings.
     if [ "$xcode_build_action" -eq 1 ]; then
         has COMPILATION_CACHE_ENABLE_CACHING "$@" || set -- "$@" COMPILATION_CACHE_ENABLE_CACHING=YES
+        # Xcode keeps this cache inside DerivedData, so worktrees and clean builds only share it from a folder outside.
+        if [ -n "${BUILD_QUEUE_XCODE_CACHE:-}" ]; then
+            case $BUILD_QUEUE_XCODE_CACHE in /*) ;; *) echo 'build-queue: BUILD_QUEUE_XCODE_CACHE must be an absolute path' >&2; exit 64 ;; esac
+            has COMPILATION_CACHE_CAS_PATH "$@" || set -- "$@" "COMPILATION_CACHE_CAS_PATH=$BUILD_QUEUE_XCODE_CACHE"
+        fi
     fi ;;
 gradlew | gradle)
     if ! has --build-cache "$@" && ! has --no-build-cache "$@"; then

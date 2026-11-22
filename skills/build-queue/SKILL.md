@@ -39,7 +39,8 @@ In a long script or a chain (`a && b && c`), wrap only the heavy step inside it:
 
 ## Build caches
 
-- `build-queue` turns on caches that are safe to share between worktrees: `COMPILATION_CACHE_ENABLE_CACHING=YES` on `xcodebuild` when a build action is named, and `--build-cache` on `gradlew`. A flag you pass yourself wins, including `--no-build-cache`.
+- `build-queue` turns on build caches: `COMPILATION_CACHE_ENABLE_CACHING=YES` on `xcodebuild` when a build action is named, and `--build-cache` on `gradlew`. A flag you pass yourself wins, including `--no-build-cache`.
+- Gradle's cache is shared by every checkout. Xcode keeps its cache inside DerivedData, so a clean build or a worktree with its own DerivedData starts empty. Set `BUILD_QUEUE_XCODE_CACHE` to an absolute path outside DerivedData to share one cache: a clean build of a small app into a new DerivedData folder then hit the cache for 268 of 390 compile steps and took 19 s against 29 s with no cache. The folder grows (about 700 MB for that app) and nothing prunes it, so delete it when it gets large.
 - When a run takes over three times what the same command usually takes, it prints `build-queue: cold build (412s, usually 50s)`. That checkout built from scratch: point it at the main checkout's build output, or fix what invalidated the cache, before the next run.
 - `--log` marks those runs in the `cold` column.
 
